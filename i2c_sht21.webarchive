@@ -1,0 +1,480 @@
+bplist00—_WebMainResource’	
+_WebResourceData_WebResourceMIMEType_WebResourceTextEncodingName_WebResourceFrameName^WebResourceURLO4y<html><head><style type="text/css"></style></head><body><pre style="word-wrap: break-word; white-space: pre-wrap;">From 47393e95990a562fd40f5995b7a63354b530c05b Mon Sep 17 00:00:00 2001
+From: Tim Rule &lt;trule.github@nym.hush.com&gt;
+Date: Sun, 8 Jul 2012 22:27:18 +0200
+Subject: [PATCH] SHT21 Sensor Library
+
+Humidity and Temperature sensor over TWI (I2C).
+
+Signed-off-by: Tim Rule &lt;trule.github@nym.hush.com&gt;
+---
+ platform/al-xsled-ext/dev/sht21-sensor.c |  325 ++++++++++++++++++++++++++++++
+ platform/al-xsled-ext/dev/sht21-sensor.h |  123 +++++++++++
+ 2 files changed, 448 insertions(+), 0 deletions(-)
+ create mode 100644 platform/al-xsled-ext/dev/sht21-sensor.c
+ create mode 100644 platform/al-xsled-ext/dev/sht21-sensor.h
+
+diff --git a/platform/al-xsled-ext/dev/sht21-sensor.c b/platform/al-xsled-ext/dev/sht21-sensor.c
+new file mode 100644
+index 0000000..f5b93dd
+--- /dev/null
++++ b/platform/al-xsled-ext/dev/sht21-sensor.c
+@@ -0,0 +1,325 @@
++/*
++ * Copyright (c) 2012, Timothy Rule &lt;trule.github@nym.hush.com&gt;
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * @file
++ * 		Sensors for SHT21 (Humidity &amp; Temperature).
++ * @author
++ * 		Timothy Rule &lt;trule.github@nym.hush.com&gt;
++ * @note
++ * 		See www.sensirion.com/SHT21
++ */
++
++#include &lt;stdlib.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;contiki.h&gt;
++#include &lt;avrdef.h&gt;
++#include &lt;avr/io.h&gt;
++#include &lt;avr/pgmspace.h&gt;
++#include "twi-master.h"
++#include "sht21-sensor.h"
++
++#define SHT21_ADDR					0x80
++#define SHT21_CMD_RESET				0xfe
++#define SHT21_CMD_TEMP				0xe3
++#define SHT21_CMD_RH				0xe5
++#define SHT21_CMD_READ_USER_REG		0xe7
++#define SHT21_CMD_WRITE_USER_REG	0xe6
++#define SHT21_HEAT_ON				0x04
++#define SHT21_HEAT_OFF				(~SHT21_HEAT_ON)
++
++/* SHT21 is connected to TWI Master on Port C. */
++#define I2C(a,b,c,d)	twi_transaction(&amp;TWIC, SHT21_ADDR, \
++								(a), (b), (c), (d));
++
++//#define DEBUG
++#ifdef DEBUG
++#define dprintf(FORMAT, args...) printf_P(PSTR(FORMAT), ##args)
++#else
++#define dprintf(...)
++#endif
++
++/* Define the sensor object. */
++const struct sensors_sensor sht21_sensor;
++
++/* Sensor status. */
++enum {
++	ON,
++	OFF
++};
++static uint8_t state = OFF;
++
++/**
++ * sht21_soft_reset
++ */
++static void
++sht21_soft_reset(void)
++{
++	uint8_t cmd_reset_reg[1] = { SHT21_CMD_RESET };
++	I2C(cmd_reset_reg, 1, NULL, 0);
++	clock_wait(3); /* Takes 15ms, here 3 * 1 / 125 = 24ms. */
++}
++
++/**
++ * sht21_sn
++ *
++ * @note	CRC check of returned data is not implemented.
++ */
++static void
++sht21_sn(void)
++{
++	uint8_t serial_number[8];
++	uint8_t cmd_read_sn_pt1[2] = { 0xfa, 0x0f };
++	uint8_t cmd_read_sn_pt2[2] = { 0xfc, 0xc9 };
++	uint8_t read_buffer[8];
++
++	/* Part 1 of serial number. */
++	memset(read_buffer, 0, sizeof(read_buffer));
++	I2C(cmd_read_sn_pt1, 2, read_buffer, 8);
++
++	serial_number[5] = read_buffer[0]; /* SNB_3 */
++	serial_number[4] = read_buffer[2]; /* SNB_2 */
++	serial_number[3] = read_buffer[4]; /* SNB_1 */
++	serial_number[2] = read_buffer[6]; /* SNB_0 */
++
++	/* Part 2 of serial number. */
++	memset(read_buffer, 0, sizeof(read_buffer));
++	I2C(cmd_read_sn_pt2, 2, read_buffer, 6);
++	serial_number[1] = read_buffer[0]; /* SNC_1 */
++	serial_number[0] = read_buffer[1]; /* SNC_0 */
++	serial_number[7] = read_buffer[3]; /* SNA_1 */
++	serial_number[6] = read_buffer[4]; /* SNA_0 */
++
++	printf_P(PSTR("SHT21 S/N %02x %02x %02x %02x %02x %02x %02x %02x\n"),
++		serial_number[7], serial_number[6], serial_number[5], serial_number[4],
++		serial_number[3], serial_number[2], serial_number[1], serial_number[0]);
++}
++
++/**
++ * sht21_heat
++ */
++static int
++sht21_heat(int on)
++{
++	int rc;
++
++	uint8_t cmd_read_user_reg[1] = { SHT21_CMD_READ_USER_REG };
++	uint8_t cmd_write_user_reg[2] = { SHT21_CMD_WRITE_USER_REG, 0x00 };
++
++	/* Read the User Register into the second byte of cmd_write_user_reg. */
++	rc = I2C(cmd_read_user_reg, 1, &amp;cmd_write_user_reg[1], 1);
++	if (rc)
++		return rc;
++
++	/* Mask in Heat setting. */
++	if (on) {
++		cmd_write_user_reg[1] |= SHT21_HEAT_ON;
++	} else {
++		cmd_write_user_reg[1] &amp;= SHT21_HEAT_OFF;
++	}
++
++	/* Write the User Register back to the SHT21. */
++	rc = I2C(cmd_write_user_reg, 2, NULL, 0);
++
++	return rc;
++}
++
++/**
++ * sht21_relative_humidity
++ *
++ * Relative humidity is calculated from the  16 bit value read from the
++ * SHT21 (with low 2 bits set to 0) with the following formula:
++ *
++ * 		RH = -6 + 125 * value / 2^16
++ *
++ * @return	Relative humidity * 100 (centi %) which gives accuracy of
++ * 			two decimal places to the caller.
++ *
++ * @note	CRC check of returned data is not implemented.
++ */
++static int
++sht21_relative_humidity(void)
++{
++	int rc;
++	uint8_t cmd_rh[1] = { SHT21_CMD_RH };
++	uint8_t read_buffer[3];
++	uint16_t raw_value;
++	float humidity;
++
++	/* Read the RH value, 12 bits (default resolution). */
++	rc = I2C(cmd_rh, 1, read_buffer, 3);
++	if (rc)
++		return 0;
++	raw_value = read_buffer[0] &lt;&lt; 8;
++	raw_value |= read_buffer[1];
++	raw_value &amp;= 0xfffc; /* Set the status bits to 0. */
++
++	/* Calculate the RH to x.xx precision. */
++	humidity = -6.0 + 125.0 * raw_value / 65536;
++
++	return (int)(humidity * 100);
++}
++
++/**
++ * sht21_temperature
++ *
++ * 		T = -46.85 + 175.72 * value / 2^16
++ *
++ * @return	Temperature * 100 (centi DegC) which gives accuracy of
++ * 			two decimal places to the caller.
++ *
++ * @note	CRC check of returned data is not implemented.
++ */
++static int
++sht21_temperature(void)
++{
++	int rc;
++	uint8_t cmd_th[1] = { SHT21_CMD_TEMP };
++	uint8_t read_buffer[3];
++	uint16_t raw_value;
++	float temperature;
++
++	/* Read the T value, 14 bits (default resolution). */
++	rc = I2C(cmd_th, 1, read_buffer, 3);
++	if (rc)
++		return 0;
++	raw_value = read_buffer[0] &lt;&lt; 8;
++	raw_value |= read_buffer[1];
++	raw_value &amp;= 0xfffc; /* Set the status bits to 0. */
++
++	/* Calculate the temperature to x.xx precision. */
++	temperature = -46.85 + 175.72 * raw_value / 65536;
++
++	return (int)(temperature * 100);
++}
++
++#if 0
++/**
++ * sht21_test
++ */
++static int
++sht21_test(void)
++{
++	int i;
++
++	printf_P(PSTR("SHT21 Sensor Self Test\n"));
++
++	sht21_soft_reset();
++	sht21_sn();
++
++	/* With the heater on the temperature should rise and the humidity
++	 * should fall for each of the readings. */
++	sht21_heat(1);
++	for (i = 0; i &lt; 10; i++) {
++		int hu = sht21_relative_humidity();
++		int te = sht21_temperature();
++		printf_P(PSTR("    Humidity %2d.%02d, Temperature %2d.%02d\n"),
++				hu / 100, hu % 100, te / 100, te % 100);
++		clock_wait(125*5); /* 5 seconds. */
++	}
++	sht21_heat(0);
++
++	return 0;
++}
++#endif
++
++/**
++ * value
++ *
++ * @note	RH samples take around 20ms to complete and not more than 30ms.
++ * @note	T samples take around 66ms to complete and not more than 85ms.
++ */
++static int
++value(int type)
++{
++	switch (type) {
++	case SHT21_SENSOR_TEMP:
++		return sht21_temperature();
++	case SHT21_SENSOR_HUMIDITY:
++		return sht21_relative_humidity();
++	case SHT21_SENSOR_HEAT_ON:
++		sht21_heat(1);
++		break;
++	case SHT21_SENSOR_HEAT_OFF:
++		sht21_heat(0);
++		break;
++	case SHT21_SENSOR_SN:
++		sht21_sn();
++		break;
++	case SHT21_SENSOR_RESET:
++		sht21_soft_reset();
++		break;
++	default:
++		break;
++	}
++
++	return 0;
++}
++
++/**
++ * configure
++ */
++static int
++configure(int type, int c)
++{
++	switch (type) {
++	case SENSORS_ACTIVE:
++		state = OFF;
++		dprintf("SHT21 Sensor Configure ...\n");
++		sht21_soft_reset();
++		sht21_heat(0);
++		state = ON;
++		break;
++	default:
++		state = OFF;
++	}
++
++	return 0;
++}
++
++/**
++ * status
++ */
++static int
++status(int type)
++{
++	switch (type) {
++	case SENSORS_ACTIVE:
++	case SENSORS_READY:
++		return (state == ON);
++	default:
++		return 0;
++	}
++}
++
++
++/* Initialise the sensor object and make it available to Contiki OS. */
++SENSORS_SENSOR(sht21_sensor, "sht21", value, configure, status);
+diff --git a/platform/al-xsled-ext/dev/sht21-sensor.h b/platform/al-xsled-ext/dev/sht21-sensor.h
+new file mode 100644
+index 0000000..8e7626a
+--- /dev/null
++++ b/platform/al-xsled-ext/dev/sht21-sensor.h
+@@ -0,0 +1,123 @@
++/*
++ * Copyright (c) 2012, Timothy Rule &lt;trule.github@nym.hush.com&gt;
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the Institute nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/**
++ * @file
++ * 		Sensors for SHT21 (Humidity &amp; Temperature).
++ * @author
++ * 		Timothy Rule &lt;trule.github@nym.hush.com&gt;
++ * @note
++ * 		See www.sensirion.com/SHT21
++ */
++
++/**
++ * SHT21 Overview.
++ *
++ * Pin	Function
++ * ==================
++ * 1	SDA
++ * 2	VSS, Ground
++ * 3	NC
++ * 4	NC
++ * 5	VDD, 2.1-3.6v
++ * 6	SCL
++ *
++ * I2C address = 0b1000 000x (x = 1 read, = 0 write)
++ *
++ * Commands:
++ * 		T measure with hold		0xE3
++ * 		RH measure with hold	0xE5
++ * 		T measure no hold		0xF3
++ * 		RH measure no hold		0xF5
++ * 		Write user reg			0xE6
++ * 		Read user reg			0xE7
++ * 		Soft reset				0xFE
++ *
++ * 	Hold Mode:
++ * 		80(w) ack E5 ack 81(r) ack ... MSB ack LSB ack CSUM nack
++ *
++ * 	No Hold Mode:
++ * 		80 ack F5 ack DATA nack DATA nack MSB ack LSB ack CSUM nack
++ *
++ *  Lower two bits of LSB represent status;
++ *  	bit 1: 0 = T, 1 = RH
++ *  	bit 0: not used
++ *
++ *  User Register:
++ *  	bit 7,0		Resolution:	b00 = 12/14 (RH/T) (default)
++ *  							b01 = 8/12
++ *  							b10 = 10/13
++ *  							b11 = 11/11
++ *  	6			Status battery: 1 = VDD &lt; 2.25V
++ *  	3,4,5		Reserved
++ *  	2			On chip heater: 1 = on
++ *  	1			Disable OTP reload: 1 = disabled (default)
++ *
++ *  	Read:
++ *  		80 ack E7 ack 81 ack REG nack
++ *  	Write
++ *  		80 ack E6 ack REG ack
++ *
++ *  Serial Number:
++ *  	64bit, byte format:	SNA_1 SNA_0 SNB_3 SNB_2 SNB_1 SNB_0 SNC_1 SNC_0
++ *
++ *  	80(w) ack FA ack 0F ack 81(r) ack SNB_3 ack CRC ack SNB_2 ack CRC ack
++ *  		SNB_1 ack CRC ack SNB_0 ack CRC nack
++ *  	80(w) ack FC ack 0F ack 81(r) ack SNC_1 ack SNC_0 ack CRC ack
++ *  		SNA_1 ack SNA_0 ack CRC nack
++ */
++
++#ifndef __SHT21_SENSOR__
++#define __SHT21_SENSOR__
++
++#include &lt;lib/sensors.h&gt;
++
++/**
++ * SHT21 Sensor List.
++ */
++#define SHT21_SENSOR_TEMP		0
++#define SHT21_SENSOR_HUMIDITY	1
++#define SHT21_SENSOR_HEAT_ON	2
++#define SHT21_SENSOR_HEAT_OFF	3
++#define SHT21_SENSOR_SN			4
++#define SHT21_SENSOR_RESET		5
++
++/**
++ * Export the SHT21 sensor object.
++ *
++ * Can be called as follows:
++ *
++ * 		#include &lt;dev/sht21-sensor.h&gt;
++ *
++ * 		sht21_sensor.value(SHT21_SENSOR_TEMP);		// Temperature in dC
++ * 		sht21_sensor.value(SHT21_SENSOR_HUMIDITY);	// Humidity
++ */
++extern const struct sensors_sensor sht21_sensor;
++
++#endif
+-- 
+1.7.5.4
+
+</pre></body></html>Ztext/plainUUTF-8P_Chttp://www.timrule.net/tl_files/Images/news/patch_contiki_sht21.txt    ( : P n Ö î555"5#                           5i
