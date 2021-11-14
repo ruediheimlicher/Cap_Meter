@@ -528,6 +528,36 @@ uint8_t frac  : Anzahl der Nachkommastellen
 }
 
 
+void lcd_putint_right(uint8_t zahl)
+{
+   char string[4];
+   int8_t i;                             // Loop counter
+   
+   string[3]='\0';                       // String Terminator
+   if (zahl == 0)
+   {
+      string[2]= '0';
+      string[1]= ' ';
+      string[0]= ' ';
+      lcd_puts(string);
+      return;
+   }
+   for(i=2; i>=0; i--)
+   {
+      if (zahl==0)
+      {
+         string[i] = ' ';                // blank
+      }
+      else
+      {
+         string[i]=((zahl % 10) +'0');       // Modulo rechnen, dann den ASCII-Code von '0' addieren
+      }
+      zahl /= 10;
+   }
+   lcd_puts(string);
+}
+
+
 
  
 void lcd_put_frac(char* string, uint8_t start, uint8_t komma, uint8_t frac) 
